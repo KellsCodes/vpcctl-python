@@ -60,7 +60,8 @@ def add_subnet(args):
 
     # Attach namespace side to namespace
     run_cmd(f"sudo ip link set {veth_ns} netns {ns_name}")
-    run_cmd(f"sudo ip netns exec {ns_name} ip link set {veth_ns} up")
+    gateway = str(ipaddress.IPv4Network(args.cidr, strict=False)[1])
+    run_cmd(f"sudo ip netns exec {ns_name} ip route add default via {gateway}")
     run_cmd(
         f"sudo ip netns exec {ns_name} ip addr add {subnet_cidr} dev {veth_ns}")
 
