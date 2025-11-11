@@ -45,7 +45,7 @@ def add_subnet(args):
     veth_ns = f"veth-{args.subnet_name}-ns"
     bridge_name = f"br-{args.vpc_name}"
 
-    print(f"Creating subnet namespace '{ns_name}'...")
+    print(f"Creating {args.type} subnet namespace '{ns_name}'...")
 
     # Create network namespace
     run_cmd(f"sudo ip netns add {ns_name}")
@@ -63,8 +63,12 @@ def add_subnet(args):
     run_cmd(
         f"sudo ip netns exec {ns_name} ip addr add {args.cidr} dev {veth_ns}")
 
-    print(
-        f"Subnet '{ns_name}' connected to bridge '{bridge_name}' with IP {args.cidr}.")
+    # Add default route for public subnets to bridge
+    if args.type == "public":
+        run_cmd(
+            f"sudo ip netns exec {ns_name} ip route add default via {args.cidr.split('.')[0]}.{args.cidr.split('.')[1]}.1")
+
+    print(f"✅ {args.type.capitalize()} subnet '{ns_name}' connected to bridge '{bridge_name}' with IP {args.cidr}.")
 
 
 def main():
@@ -95,6 +99,12 @@ def main():
     parser_subnet.add_argument("vpc_name", help="VPC name")
     parser_subnet.add_argument("subnet_name", help="Subnet name")
     parser_subnet.add_argument("cidr", help="Subnet CIDR block")
+    parser_subnet.add_argument(
+        "--type",
+        choices=["public", "private"],
+        default="private",
+        help="Subnet type: public or private"
+    )
     parser_subnet.set_defaults(func=add_subnet)
 
     args = parser.parse_args()
