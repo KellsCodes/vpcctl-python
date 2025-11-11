@@ -3,6 +3,7 @@
 import argparse
 import subprocess
 import json
+import ipaddress
 
 
 def run_cmd(cmd):
@@ -44,6 +45,9 @@ def add_subnet(args):
 
     print(f"Creating {args.type} subnet namespace '{ns_name}'...")
 
+    # Determine subnet IP (automatic if not provided)
+    subnet_cidr = args.cidr or calculate_subnet_ip(args.base_cidr, args.type)
+
     # Create network namespace
     run_cmd(f"sudo ip netns add {ns_name}")
 
@@ -58,14 +62,27 @@ def add_subnet(args):
     run_cmd(f"sudo ip link set {veth_ns} netns {ns_name}")
     run_cmd(f"sudo ip netns exec {ns_name} ip link set {veth_ns} up")
     run_cmd(
-        f"sudo ip netns exec {ns_name} ip addr add {args.cidr} dev {veth_ns}")
+        f"sudo ip netns exec {ns_name} ip addr add {subnet_cidr} dev {veth_ns}")
 
     # Add default route for public subnets to bridge
     if args.type == "public":
+        # use first host IP in subnet as gateway (x.x.1.1)
+        first_octets = ".".join(subnet_cidr.split(".")[:2])
         run_cmd(
-            f"sudo ip netns exec {ns_name} ip route add default via {args.cidr.split('.')[0]}.{args.cidr.split('.')[1]}.1")
+            f"sudo ip netns exec {ns_name} ip route add default via {first_octets}.1.1"
+        )
 
-    print(f"{args.type.capitalize()} subnet '{ns_name}' connected to bridge '{bridge_name}' with IP {args.cidr}.")
+    print(f"{args.type.capitalize()} subnet '{ns_name}' connected to bridge '{bridge_name}' with IP {subnet_cidr}.")
+
+
+def calculate_subnet_ip(base_cidr, subnet_type):
+    net = ipaddress.IPv4Network(base_cidr)
+    # pick first /24 for public, second /24 for private
+    if subnet_type == "public":
+        subnet = list(net.subnets(new_prefix=24))[0]
+    else:  # private
+        subnet = list(net.subnets(new_prefix=24))[1]
+    return str(subnet)
 
 
 def peer_vpc(args):
@@ -196,16 +213,17 @@ def main():
     # Delete vpc
     parser_delete = subparsers.add_parser("delete-vpc", help="Delete a VPC")
     parser_delete.add_argument("name", help="VPC name")
-    parser_delete.add_argument("--public-interface", help="Host interface used for NAT")
+    parser_delete.add_argument(
+        "--public-interface", help="Host interface used for NAT")
     parser_delete.add_argument("--cidr", help="VPC CIDR block")
     parser_delete.set_defaults(func=delete_vpc)
 
     # Delete subnet
-    parser_delete_subnet = subparsers.add_parser("delete-subnet", help="Delete a subnet")
+    parser_delete_subnet = subparsers.add_parser(
+        "delete-subnet", help="Delete a subnet")
     parser_delete_subnet.add_argument("vpc_name", help="VPC name")
     parser_delete_subnet.add_argument("subnet_name", help="Subnet name")
     parser_delete_subnet.set_defaults(func=delete_subnet)
-
 
     args = parser.parse_args()
 
