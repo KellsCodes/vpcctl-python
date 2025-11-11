@@ -60,10 +60,15 @@ def add_subnet(args):
 
     # Attach namespace side to namespace
     run_cmd(f"sudo ip link set {veth_ns} netns {ns_name}")
-    gateway = str(ipaddress.IPv4Network(args.cidr, strict=False)[1])
-    run_cmd(f"sudo ip netns exec {ns_name} ip route add default via {gateway}")
+    run_cmd(f"sudo ip netns exec {ns_name} ip link set {veth_ns} up")
+
+    # Determine subnet IP (auto-calculate if not provided)
+    subnet_ip = args.cidr or calculate_subnet_ip(args.base_cidr, args.type)
     run_cmd(
-        f"sudo ip netns exec {ns_name} ip addr add {subnet_cidr} dev {veth_ns}")
+        f"sudo ip netns exec {ns_name} ip addr add {subnet_ip} dev {veth_ns}")
+
+    # Determine gateway (first usable IP in subnet)
+    gateway = str(ipaddress.IPv4Network(subnet_ip, strict=False)[1])
 
     # Add default route for public subnets to bridge
     if args.type == "public":
