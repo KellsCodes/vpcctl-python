@@ -20,7 +20,19 @@ def create_vpc(args):
     # Create the Linux bridge
     run_cmd(f"sudo ip link add name {bridge_name} type bridge")
     run_cmd(f"sudo ip link set dev {bridge_name} up")
-    print(f"Bridge '{bridge_name}' created and brought up.")
+
+    # Enable IP forwarding
+    run_cmd("sudo sysctl -w net.ipv4.ip_forward=1")
+    print("IP forwarding enabled.")
+
+    # Set up NAT if public interface provided
+    if args.public_interface:
+        run_cmd(
+            f"sudo iptables -t nat -A POSTROUTING -s {args.cidr} -o {args.public_interface} -j MASQUERADE")
+        print(
+            f"NAT configured for outbound traffic via {args.public_interface}")
+
+    print(f"Bridge '{bridge_name}' created and ready.")
 
 
 def delete_vpc(args):
@@ -66,6 +78,10 @@ def main():
         "create-vpc", help="Create a new VPC")
     parser_create.add_argument("name", help="VPC name")
     parser_create.add_argument("cidr", help="VPC CIDR block")
+    parser_create.add_argument(
+        "--public-interface",
+        help="Host network interface for outbound NAT (e.g., eth0, wlp20)"
+    )
     parser_create.set_defaults(func=create_vpc)
 
     # delete-vpc
