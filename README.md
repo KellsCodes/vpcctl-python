@@ -1,5 +1,5 @@
-# Multi-VPC Network Simulation with Namespace Isolation
-This project demonstrates how to simulate multiple Virtual Private Clouds (VPCs) using Linux network namespaces, virtual Ethernet (veth) pairs, and bridges.
+# VPC CLI for Network Simulation with Namespace Isolation
+This project demonstrates how to simulate Virtual Private Clouds (VPCs) using Linux network namespaces, virtual Ethernet (veth) pairs, and bridges.
 Each VPC contains public and private subnets, with routing, NAT, and isolation configured to mimic cloud VPC behavior (similar to AWS VPC).
 
 ## Features
@@ -16,13 +16,14 @@ Each VPC contains public and private subnets, with routing, NAT, and isolation c
 * Easily extend to simulate VPC peering and routing policies.
 
 ## Project Structure
-.
+```bash
 ├── Makefile
 ├── vpcctl.py
 ├── README.md
 ├── cleanup.sh
 ├── policies.json
 └── requirements.txt  (optional, not required for system tools)
+```
 
 ## Prerequisites
 Make sure the following are installed on your Linux host:
