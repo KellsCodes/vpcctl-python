@@ -2,6 +2,7 @@
 
 import argparse
 import subprocess
+import json
 
 
 def run_cmd(cmd):
@@ -69,7 +70,8 @@ def add_subnet(args):
             f"sudo ip netns exec {ns_name} ip route add default via {args.cidr.split('.')[0]}.{args.cidr.split('.')[1]}.1")
 
     print(f"{args.type.capitalize()} subnet '{ns_name}' connected to bridge '{bridge_name}' with IP {args.cidr}.")
-    
+
+
 def peer_vpc(args):
     """Peer two VPCs via bridge-to-bridge veth pair"""
     bridge_a = f"br-{args.vpc_a}"
@@ -86,8 +88,26 @@ def peer_vpc(args):
     run_cmd(f"sudo ip link set {veth_a} up")
     run_cmd(f"sudo ip link set {veth_b} up")
 
-    print(f"VPCs '{args.vpc_a}' and '{args.vpc_b}' successfully peered via bridges.")
+    print(
+        f"VPCs '{args.vpc_a}' and '{args.vpc_b}' successfully peered via bridges.")
 
+
+def apply_policy(args):
+    """Apply firewall rules to a subnet namespace"""
+    with open(args.file) as f:
+        policies = json.load(f)
+
+    for policy in policies:
+        ns_name = f"{args.vpc}-{policy['subnet'].split('.')[2]}-{args.subnet_type}"
+        print(f"Applying policy to {ns_name}...")
+
+        for rule in policy.get("ingress", []):
+            if rule["action"] == "allow":
+                cmd = f"sudo ip netns exec {ns_name} iptables -A INPUT -p {rule['protocol']} --dport {rule['port']} -j ACCEPT"
+            else:
+                cmd = f"sudo ip netns exec {ns_name} iptables -A INPUT -p {rule['protocol']} --dport {rule['port']} -j DROP"
+            run_cmd(cmd)
+    print("Policies applied successfully.")
 
 
 def main():
@@ -125,12 +145,21 @@ def main():
         help="Subnet type: public or private"
     )
     parser_subnet.set_defaults(func=add_subnet)
-    
+
     # Add Peer VPC
     parser_peer = subparsers.add_parser("peer-vpc", help="Peer two VPCs")
     parser_peer.add_argument("vpc_a", help="First VPC name")
     parser_peer.add_argument("vpc_b", help="Second VPC name")
     parser_peer.set_defaults(func=peer_vpc)
+
+    # Add Parser policy
+    parser_policy = subparsers.add_parser(
+        "apply-policy", help="Apply firewall policies to a subnet")
+    parser_policy.add_argument("vpc", help="VPC name")
+    parser_policy.add_argument("subnet_type", choices=[
+                               "public", "private"], help="Subnet type")
+    parser_policy.add_argument("file", help="Path to JSON policy file")
+    parser_policy.set_defaults(func=apply_policy)
 
     args = parser.parse_args()
 
