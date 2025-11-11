@@ -11,7 +11,7 @@ PUBLIC_IFACE = $(shell ip route | awk '/default/ {print $$5; exit}')
 
 # Make CLI executable
 setup:
-	@echo "🔧 Making CLI executable..."
+	@echo "Making CLI executable..."
 	chmod +x $(CLI)
 	@echo "CLI ready!"
 

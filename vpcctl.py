@@ -56,7 +56,8 @@ def add_subnet(args):
     elif getattr(args, "base_cidr", None):
         subnet_ip = calculate_subnet_ip(args.base_cidr, args.type)
     else:
-        raise SystemExit("Error: either --cidr or --base-cidr must be provided for add-subnet")
+        raise SystemExit(
+            "Error: either --cidr or --base-cidr must be provided for add-subnet")
 
     # Create network namespace (idempotent-ish)
     run_cmd(f"sudo ip netns add {ns_name}")
@@ -74,7 +75,8 @@ def add_subnet(args):
     run_cmd(f"sudo ip netns exec {ns_name} ip link set {veth_ns} up")
 
     # Assign IP to namespace interface
-    run_cmd(f"sudo ip netns exec {ns_name} ip addr add {subnet_ip} dev {veth_ns}")
+    run_cmd(
+        f"sudo ip netns exec {ns_name} ip addr add {subnet_ip} dev {veth_ns}")
 
     # Calculate gateway (first usable IP in subnet)
     net = ipaddress.IPv4Network(subnet_ip, strict=False)
@@ -87,7 +89,8 @@ def add_subnet(args):
 
     # Add default route for public subnets to bridge/gateway
     if args.type == "public":
-        run_cmd(f"sudo ip netns exec {ns_name} ip route add default via {gateway}")
+        run_cmd(
+            f"sudo ip netns exec {ns_name} ip route add default via {gateway}")
 
     print(f"{args.type.capitalize()} subnet '{ns_name}' connected to bridge '{bridge_name}' with IP {subnet_ip}.")
 
@@ -127,7 +130,8 @@ def peer_vpc(args):
     run_cmd(f"sudo ip link set {veth_a} up")
     run_cmd(f"sudo ip link set {veth_b} up")
 
-    print(f"VPCs '{args.vpc_a}' and '{args.vpc_b}' successfully peered via bridges.")
+    print(
+        f"VPCs '{args.vpc_a}' and '{args.vpc_b}' successfully peered via bridges.")
 
 
 def apply_policy(args):
@@ -260,7 +264,15 @@ def main():
     if hasattr(args, "func"):
         args.func(args)
     else:
-        parser.print_help()
+        print("\nUsage: python3 vpcctl.py <command> [options]\n")
+        print("Available commands:")
+        print("  create-vpc       Create a new virtual private cloud")
+        print("  delete-vpc       Delete an existing VPC and its subnets")
+        print("  add-subnet       Add a public or private subnet to a VPC")
+        print("  peer-vpc         Peer two VPCs together")
+        print("  apply-policy     Apply firewall rules from a JSON file")
+        print("  delete-subnet    Delete a subnet namespace")
+        print("\nRun with '-h' after any command for more details.\n")
 
 
 if __name__ == "__main__":
