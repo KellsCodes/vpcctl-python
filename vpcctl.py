@@ -68,7 +68,26 @@ def add_subnet(args):
         run_cmd(
             f"sudo ip netns exec {ns_name} ip route add default via {args.cidr.split('.')[0]}.{args.cidr.split('.')[1]}.1")
 
-    print(f"✅ {args.type.capitalize()} subnet '{ns_name}' connected to bridge '{bridge_name}' with IP {args.cidr}.")
+    print(f"{args.type.capitalize()} subnet '{ns_name}' connected to bridge '{bridge_name}' with IP {args.cidr}.")
+    
+def peer_vpc(args):
+    """Peer two VPCs via bridge-to-bridge veth pair"""
+    bridge_a = f"br-{args.vpc_a}"
+    bridge_b = f"br-{args.vpc_b}"
+    veth_a = f"veth-{args.vpc_a}-to-{args.vpc_b}"
+    veth_b = f"veth-{args.vpc_b}-to-{args.vpc_a}"
+
+    print(f"Peering VPC '{args.vpc_a}' and VPC '{args.vpc_b}'...")
+
+    # Create veth pair between bridges
+    run_cmd(f"sudo ip link add {veth_a} type veth peer name {veth_b}")
+    run_cmd(f"sudo ip link set {veth_a} master {bridge_a}")
+    run_cmd(f"sudo ip link set {veth_b} master {bridge_b}")
+    run_cmd(f"sudo ip link set {veth_a} up")
+    run_cmd(f"sudo ip link set {veth_b} up")
+
+    print(f"VPCs '{args.vpc_a}' and '{args.vpc_b}' successfully peered via bridges.")
+
 
 
 def main():
@@ -106,6 +125,12 @@ def main():
         help="Subnet type: public or private"
     )
     parser_subnet.set_defaults(func=add_subnet)
+    
+    # Add Peer VPC
+    parser_peer = subparsers.add_parser("peer-vpc", help="Peer two VPCs")
+    parser_peer.add_argument("vpc_a", help="First VPC name")
+    parser_peer.add_argument("vpc_b", help="Second VPC name")
+    parser_peer.set_defaults(func=peer_vpc)
 
     args = parser.parse_args()
 
