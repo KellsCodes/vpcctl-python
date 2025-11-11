@@ -183,10 +183,18 @@ def main():
 
     # add-subnet
     parser_subnet = subparsers.add_parser(
-        "add-subnet", help="Add a subnet to a VPC")
+        "add-subnet", help="Add a subnet to a VPC"
+    )
     parser_subnet.add_argument("vpc_name", help="VPC name")
     parser_subnet.add_argument("subnet_name", help="Subnet name")
-    parser_subnet.add_argument("cidr", help="Subnet CIDR block")
+    parser_subnet.add_argument(
+        "--cidr",
+        help="Optional CIDR block for the subnet (e.g. 10.0.1.0/24). If omitted, it will be calculated from --base-cidr."
+    )
+    parser_subnet.add_argument(
+        "--base-cidr",
+        help="Base CIDR of the VPC for automatic subnet IP calculation (e.g. 10.20.0.0/16)"
+    )
     parser_subnet.add_argument(
         "--type",
         choices=["public", "private"],
