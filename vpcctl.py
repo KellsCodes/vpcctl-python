@@ -28,17 +28,22 @@ def create_vpc(args):
     print("IP forwarding enabled.")
 
     # Set up NAT if public interface provided
-    if args.public_interface:
-        run_cmd(
-            f"sudo iptables -t nat -A POSTROUTING -s {args.cidr} -o {args.public_interface} -j MASQUERADE")
-        print(
-            f"NAT configured for outbound traffic via {args.public_interface}")
-
+    if getattr(args, "public_interface", None):
+        # use provided CIDR for masquerade if available else skip
+        cidr = getattr(args, "cidr", None) or getattr(args, "base_cidr", None)
+        if cidr:
+            run_cmd(
+                f"sudo iptables -t nat -A POSTROUTING -s {cidr} -o {args.public_interface} -j MASQUERADE")
+            print(
+                f"NAT configured for outbound traffic via {args.public_interface}")
+        else:
+            print("No VPC CIDR provided; skipping NAT rule.")
     print(f"Bridge '{bridge_name}' created and ready.")
 
 
 def add_subnet(args):
     ns_name = f"{args.vpc_name}-{args.subnet_name}"
+    # short veth names to meet linux limits
     veth_host = f"veth-{args.vpc_name[:3]}-{args.subnet_name[:2]}-h"
     veth_ns = f"veth-{args.vpc_name[:3]}-{args.subnet_name[:2]}-n"
     bridge_name = f"br-{args.vpc_name}"
@@ -46,12 +51,18 @@ def add_subnet(args):
     print(f"Creating {args.type} subnet namespace '{ns_name}'...")
 
     # Determine subnet IP (automatic if not provided)
-    subnet_cidr = args.cidr or calculate_subnet_ip(args.base_cidr, args.type)
+    if args.cidr:
+        subnet_ip = args.cidr
+    elif getattr(args, "base_cidr", None):
+        subnet_ip = calculate_subnet_ip(args.base_cidr, args.type)
+    else:
+        raise SystemExit("Error: either --cidr or --base-cidr must be provided for add-subnet")
 
-    # Create network namespace
+    # Create network namespace (idempotent-ish)
     run_cmd(f"sudo ip netns add {ns_name}")
 
-    # Create veth pair
+    # Create veth pair (delete any stale before creating to avoid conflicts)
+    run_cmd(f"sudo ip link del {veth_host} 2>/dev/null || true")
     run_cmd(f"sudo ip link add {veth_host} type veth peer name {veth_ns}")
 
     # Attach host side to bridge
@@ -62,32 +73,36 @@ def add_subnet(args):
     run_cmd(f"sudo ip link set {veth_ns} netns {ns_name}")
     run_cmd(f"sudo ip netns exec {ns_name} ip link set {veth_ns} up")
 
-    # Determine subnet IP (auto-calculate if not provided)
-    subnet_ip = args.cidr or calculate_subnet_ip(args.base_cidr, args.type)
-    run_cmd(
-        f"sudo ip netns exec {ns_name} ip addr add {subnet_ip} dev {veth_ns}")
+    # Assign IP to namespace interface
+    run_cmd(f"sudo ip netns exec {ns_name} ip addr add {subnet_ip} dev {veth_ns}")
 
-    # Determine gateway (first usable IP in subnet)
-    gateway = str(ipaddress.IPv4Network(subnet_ip, strict=False)[1])
+    # Calculate gateway (first usable IP in subnet)
+    net = ipaddress.IPv4Network(subnet_ip, strict=False)
+    gateway = str(net.network_address + 1)
 
-    # Add default route for public subnets to bridge
+    # Ensure bridge has gateway IP so namespace can reach it (idempotent)
+    # add with /prefixlen derived from subnet
+    prefix = net.prefixlen
+    run_cmd(f"sudo ip addr add {gateway}/{prefix} dev {bridge_name} || true")
+
+    # Add default route for public subnets to bridge/gateway
     if args.type == "public":
-        # use first host IP in subnet as gateway (x.x.1.1)
-        first_octets = ".".join(subnet_cidr.split(".")[:2])
-        run_cmd(
-            f"sudo ip netns exec {ns_name} ip route add default via {first_octets}.1.1"
-        )
+        run_cmd(f"sudo ip netns exec {ns_name} ip route add default via {gateway}")
 
-    print(f"{args.type.capitalize()} subnet '{ns_name}' connected to bridge '{bridge_name}' with IP {subnet_cidr}.")
+    print(f"{args.type.capitalize()} subnet '{ns_name}' connected to bridge '{bridge_name}' with IP {subnet_ip}.")
 
 
 def calculate_subnet_ip(base_cidr, subnet_type):
-    net = ipaddress.IPv4Network(base_cidr)
+    net = ipaddress.IPv4Network(base_cidr, strict=False)
     # pick first /24 for public, second /24 for private
+    subnets = list(net.subnets(new_prefix=24))
+    if len(subnets) < 2:
+        raise SystemExit("Error: base CIDR too small to create /24 subnets")
     if subnet_type == "public":
-        subnet = list(net.subnets(new_prefix=24))[0]
+        subnet = subnets[0]
     else:  # private
-        subnet = list(net.subnets(new_prefix=24))[1]
+        subnet = subnets[1]
+    # return subnet network in form "10.20.1.0/24"
     return str(subnet)
 
 
@@ -95,10 +110,15 @@ def peer_vpc(args):
     """Peer two VPCs via bridge-to-bridge veth pair"""
     bridge_a = f"br-{args.vpc_a}"
     bridge_b = f"br-{args.vpc_b}"
-    veth_a = f"veth-{args.vpc_a}-to-{args.vpc_b}"
-    veth_b = f"veth-{args.vpc_b}-to-{args.vpc_a}"
+    # short veth names
+    veth_a = f"veth-{args.vpc_a[:3]}-{args.vpc_b[:3]}-a"
+    veth_b = f"veth-{args.vpc_b[:3]}-{args.vpc_a[:3]}-b"
 
     print(f"Peering VPC '{args.vpc_a}' and VPC '{args.vpc_b}'...")
+
+    # cleanup stale
+    run_cmd(f"sudo ip link del {veth_a} 2>/dev/null || true")
+    run_cmd(f"sudo ip link del {veth_b} 2>/dev/null || true")
 
     # Create veth pair between bridges
     run_cmd(f"sudo ip link add {veth_a} type veth peer name {veth_b}")
@@ -107,19 +127,19 @@ def peer_vpc(args):
     run_cmd(f"sudo ip link set {veth_a} up")
     run_cmd(f"sudo ip link set {veth_b} up")
 
-    print(
-        f"VPCs '{args.vpc_a}' and '{args.vpc_b}' successfully peered via bridges.")
+    print(f"VPCs '{args.vpc_a}' and '{args.vpc_b}' successfully peered via bridges.")
 
 
 def apply_policy(args):
     """Apply firewall rules to a subnet namespace"""
+    # target namespace based on provided vpc and subnet_type
+    ns_name = f"{args.vpc}-{args.subnet_type}"
+    print(f"Applying policies from {args.file} to namespace {ns_name}...")
+
     with open(args.file) as f:
         policies = json.load(f)
 
     for policy in policies:
-        ns_name = f"{args.vpc}-{policy['subnet'].split('.')[2]}-{args.subnet_type}"
-        print(f"Applying policy to {ns_name}...")
-
         for rule in policy.get("ingress", []):
             if rule["action"] == "allow":
                 cmd = f"sudo ip netns exec {ns_name} iptables -A INPUT -p {rule['protocol']} --dport {rule['port']} -j ACCEPT"
@@ -131,14 +151,15 @@ def apply_policy(args):
 
 def delete_subnet(args):
     ns_name = f"{args.vpc_name}-{args.subnet_name}"
-    veth_host = f"veth-{args.subnet_name}-host"
+    # compute veth host name with same pattern used in add_subnet
+    veth_host = f"veth-{args.vpc_name[:3]}-{args.subnet_name[:2]}-h"
     print(f"Deleting subnet namespace '{ns_name}'...")
 
     # Delete namespace
-    run_cmd(f"sudo ip netns del {ns_name}")
+    run_cmd(f"sudo ip netns del {ns_name} || true")
 
     # Delete host veth if exists
-    run_cmd(f"sudo ip link del {veth_host} || true")
+    run_cmd(f"sudo ip link del {veth_host} 2>/dev/null || true")
 
     print(f"Subnet '{ns_name}' cleaned up.")
 
@@ -157,8 +178,8 @@ def delete_vpc(args):
     run_cmd(f"sudo ip link set {bridge_name} down || true")
     run_cmd(f"sudo ip link del {bridge_name} type bridge || true")
 
-    # Remove NAT rules
-    if args.public_interface:
+    # Remove NAT rules if provided
+    if getattr(args, "public_interface", None) and getattr(args, "cidr", None):
         run_cmd(
             f"sudo iptables -t nat -D POSTROUTING -s {args.cidr} -o {args.public_interface} -j MASQUERADE || true")
 
@@ -182,9 +203,12 @@ def main():
     )
     parser_create.set_defaults(func=create_vpc)
 
-    # delete-vpc
+    # delete-vpc (single parser is enough)
     parser_delete = subparsers.add_parser("delete-vpc", help="Delete a VPC")
     parser_delete.add_argument("name", help="VPC name")
+    parser_delete.add_argument(
+        "--public-interface", help="Host interface used for NAT")
+    parser_delete.add_argument("--cidr", help="VPC CIDR block")
     parser_delete.set_defaults(func=delete_vpc)
 
     # add-subnet
@@ -209,13 +233,13 @@ def main():
     )
     parser_subnet.set_defaults(func=add_subnet)
 
-    # Add Peer VPC
+    # peer-vpc
     parser_peer = subparsers.add_parser("peer-vpc", help="Peer two VPCs")
     parser_peer.add_argument("vpc_a", help="First VPC name")
     parser_peer.add_argument("vpc_b", help="Second VPC name")
     parser_peer.set_defaults(func=peer_vpc)
 
-    # Add Parser policy
+    # apply-policy
     parser_policy = subparsers.add_parser(
         "apply-policy", help="Apply firewall policies to a subnet")
     parser_policy.add_argument("vpc", help="VPC name")
@@ -224,15 +248,7 @@ def main():
     parser_policy.add_argument("file", help="Path to JSON policy file")
     parser_policy.set_defaults(func=apply_policy)
 
-    # Delete vpc
-    parser_delete = subparsers.add_parser("delete-vpc", help="Delete a VPC")
-    parser_delete.add_argument("name", help="VPC name")
-    parser_delete.add_argument(
-        "--public-interface", help="Host interface used for NAT")
-    parser_delete.add_argument("--cidr", help="VPC CIDR block")
-    parser_delete.set_defaults(func=delete_vpc)
-
-    # Delete subnet
+    # delete-subnet
     parser_delete_subnet = subparsers.add_parser(
         "delete-subnet", help="Delete a subnet")
     parser_delete_subnet.add_argument("vpc_name", help="VPC name")
