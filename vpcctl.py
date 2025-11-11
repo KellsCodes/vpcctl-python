@@ -39,8 +39,8 @@ def create_vpc(args):
 
 def add_subnet(args):
     ns_name = f"{args.vpc_name}-{args.subnet_name}"
-    veth_host = f"veth-{args.subnet_name}-host"
-    veth_ns = f"veth-{args.subnet_name}-ns"
+    veth_host = f"veth-{args.vpc_name[:3]}-{args.subnet_name[:2]}-h"
+    veth_ns = f"veth-{args.vpc_name[:3]}-{args.subnet_name[:2]}-n"
     bridge_name = f"br-{args.vpc_name}"
 
     print(f"Creating {args.type} subnet namespace '{ns_name}'...")
