@@ -36,10 +36,6 @@ def create_vpc(args):
     print(f"Bridge '{bridge_name}' created and ready.")
 
 
-def delete_vpc(args):
-    print(f"Deleting VPC '{args.name}'...")
-
-
 def add_subnet(args):
     ns_name = f"{args.vpc_name}-{args.subnet_name}"
     veth_host = f"veth-{args.subnet_name}-host"
@@ -110,6 +106,42 @@ def apply_policy(args):
     print("Policies applied successfully.")
 
 
+def delete_subnet(args):
+    ns_name = f"{args.vpc_name}-{args.subnet_name}"
+    veth_host = f"veth-{args.subnet_name}-host"
+    print(f"Deleting subnet namespace '{ns_name}'...")
+
+    # Delete namespace
+    run_cmd(f"sudo ip netns del {ns_name}")
+
+    # Delete host veth if exists
+    run_cmd(f"sudo ip link del {veth_host} || true")
+
+    print(f"Subnet '{ns_name}' cleaned up.")
+
+
+def delete_vpc(args):
+    bridge_name = f"br-{args.name}"
+    print(f"Deleting VPC '{args.name}' and all subnets...")
+
+    # Delete all namespaces matching the VPC
+    result = subprocess.run(
+        f"ip netns list | grep {args.name}", shell=True, capture_output=True, text=True)
+    for ns in result.stdout.splitlines():
+        run_cmd(f"sudo ip netns del {ns.strip()}")
+
+    # Delete bridge
+    run_cmd(f"sudo ip link set {bridge_name} down || true")
+    run_cmd(f"sudo ip link del {bridge_name} type bridge || true")
+
+    # Remove NAT rules
+    if args.public_interface:
+        run_cmd(
+            f"sudo iptables -t nat -D POSTROUTING -s {args.cidr} -o {args.public_interface} -j MASQUERADE || true")
+
+    print(f"VPC '{args.name}' deleted successfully.")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="vpcctl - Virtual Private Cloud CLI")
@@ -160,6 +192,20 @@ def main():
                                "public", "private"], help="Subnet type")
     parser_policy.add_argument("file", help="Path to JSON policy file")
     parser_policy.set_defaults(func=apply_policy)
+
+    # Delete vpc
+    parser_delete = subparsers.add_parser("delete-vpc", help="Delete a VPC")
+    parser_delete.add_argument("name", help="VPC name")
+    parser_delete.add_argument("--public-interface", help="Host interface used for NAT")
+    parser_delete.add_argument("--cidr", help="VPC CIDR block")
+    parser_delete.set_defaults(func=delete_vpc)
+
+    # Delete subnet
+    parser_delete_subnet = subparsers.add_parser("delete-subnet", help="Delete a subnet")
+    parser_delete_subnet.add_argument("vpc_name", help="VPC name")
+    parser_delete_subnet.add_argument("subnet_name", help="Subnet name")
+    parser_delete_subnet.set_defaults(func=delete_subnet)
+
 
     args = parser.parse_args()
 
