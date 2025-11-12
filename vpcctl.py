@@ -39,9 +39,12 @@ def create_vpc(name, base_cidr, public_iface=None):
         f"ip addr add {base_cidr.split('.')[0]}.{base_cidr.split('.')[1]}.0.1/16 dev {bridge_name}")
     run_cmd(f"ip link set {bridge_name} up")
 
-    if public_iface:
-        run_cmd(
-            f"iptables -t nat -A POSTROUTING -o {public_iface} -j MASQUERADE")
+    # Save public interface metadata so add_subnet can apply NAT only for public subnets
+    os.makedirs(LOG_DIR, exist_ok=True)
+    meta_file = os.path.join(LOG_DIR, f"{name}.meta")
+    meta = {"public_interface": public_iface} if public_iface else {}
+    with open(meta_file, "w") as mf:
+        json.dump(meta, mf)
 
     log_action("create-vpc", "success", f"Bridge {bridge_name} created")
     print(f"VPC '{name}' created successfully.")
@@ -77,17 +80,40 @@ def add_subnet(vpc_name, subnet_name, subnet_type, base_cidr):
     run_cmd(f"ip link set {veth_host} master {bridge_name}")
     run_cmd(f"ip link set {veth_host} up")
 
-    # Assign IPs
+    # Assign IP to namespace veth and bring it up
     run_cmd(
         f"ip netns exec {ns_name} ip addr add 10.10.{subnet_id}.2/24 dev {veth_ns}")
     run_cmd(f"ip netns exec {ns_name} ip link set {veth_ns} up")
 
-    # Add gateway IP for this subnet on the bridge
+    # Add gateway IP for this subnet on the bridge (so namespace can reach gateway)
     run_cmd(f"ip addr add 10.10.{subnet_id}.1/24 dev {bridge_name} || true")
 
-    # Default route for the subnet namespace
+    # Default route for the subnet namespace via the gateway
     run_cmd(
         f"ip netns exec {ns_name} ip route add default via 10.10.{subnet_id}.1")
+
+    # 🔒 Apply NAT only for public subnets (read public interface from meta file)
+    meta_file = os.path.join(LOG_DIR, f"{vpc_name}.meta")
+    public_iface = None
+    if os.path.exists(meta_file):
+        try:
+            with open(meta_file, "r") as mf:
+                meta = json.load(mf)
+                public_iface = meta.get("public_interface")
+        except Exception:
+            public_iface = None
+
+    if subnet_type == "public" and public_iface:
+        # Use iptables -C ... || -A ... so duplicate rules aren't added
+        cmd = (
+            f"iptables -t nat -C POSTROUTING -s {subnet_cidr} -o {public_iface} -j MASQUERADE "
+            f"|| iptables -t nat -A POSTROUTING -s {subnet_cidr} -o {public_iface} -j MASQUERADE"
+        )
+        run_cmd(cmd, ignore_error=True)
+        log_action("nat", "applied", f"{subnet_cidr} -> {public_iface}")
+    else:
+        log_action("nat", "skipped",
+                   f"{subnet_name} (public_iface={public_iface})")
 
     log_action("add-subnet", "success",
                f"Subnet {subnet_name} ({subnet_cidr}) added")
