@@ -54,22 +54,23 @@ def add_subnet(args):
     run(f"sudo ip netns exec {ns} ip addr add {host_ip}/{prefix} dev {veth_n} 2>/dev/null || true")
     run(f"sudo ip addr add {gw}/{prefix} dev {br} 2>/dev/null || true")
 
-    # routing
-    # local subnet route always
+    # local route always
     run(f"sudo ip netns exec {ns} ip route add {net.network_address}/{prefix} dev {veth_n} 2>/dev/null || true")
 
     if args.type == "public":
-        # public gets default route and NAT for *this subnet only*
+        # public subnet gets internet access via NAT
         run(f"sudo ip netns exec {ns} ip route add default via {gw} 2>/dev/null || true")
-        # detect host default interface and add NAT for this subnet (/24)
         iface = subprocess.run(
-            "ip route | awk '/default/ {print $5; exit}'", shell=True, capture_output=True, text=True).stdout.strip()
+            "ip route | awk '/default/ {print $5; exit}'", shell=True, capture_output=True, text=True
+        ).stdout.strip()
         if iface:
-            run(f"sudo iptables -t nat -C POSTROUTING -s {cidr} -o {iface} -j MASQUERADE 2>/dev/null || sudo iptables -t nat -A POSTROUTING -s {cidr} -o {iface} -j MASQUERADE")
+            run(f"sudo iptables -t nat -C POSTROUTING -s {cidr} -o {iface} -j MASQUERADE 2>/dev/null || "
+                f"sudo iptables -t nat -A POSTROUTING -s {cidr} -o {iface} -j MASQUERADE")
             print(f"NAT enabled for public subnet {cidr} via {iface}")
     else:
-        # private: NO default route -> no internet
-        print(f"Private subnet created without default route (no internet).")
+        # private subnet: route via gateway for VPC-local communication only
+        run(f"sudo ip netns exec {ns} ip route add default via {gw} 2>/dev/null || true")
+        print(f"Private subnet can reach public subnet within VPC, but has no internet access.")
 
     print(f"Subnet '{ns}' ready — host IP {host_ip}, gateway {gw}")
 
