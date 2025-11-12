@@ -1,139 +1,174 @@
 #!/usr/bin/env python3
-import argparse
-import subprocess
-import ipaddress
+import os
+import sys
 import json
+import subprocess
+import argparse
+from datetime import datetime
+
+LOG_DIR = "logs"
+LOG_FILE = os.path.join(LOG_DIR, "vpcctl.log")
 
 
-def run(cmd):
-    """Run shell commands safely."""
-    print(f"> {cmd}")
-    subprocess.run(cmd, shell=True, check=False)
+""" Utility Functions """
+
+def log_action(action, status="success", details=""):
+    """Write a structured log line."""
+    os.makedirs(LOG_DIR, exist_ok=True)
+    with open(LOG_FILE, "a") as f:
+        f.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
+                f"ACTION={action} STATUS={status} DETAILS={details}\n")
 
 
-def create_vpc(args):
-    br = f"br-{args.name}"
-    print(f"Setting up VPC '{args.name}'...")
-    # idempotent bridge setup
-    run(f"sudo ip link show {br} || sudo ip link add name {br} type bridge")
-    run(f"sudo ip link set dev {br} up")
-    run("sudo sysctl -w net.ipv4.ip_forward=1")
-    print(f"VPC '{args.name}' ready (bridge {br}).")
+def run_cmd(cmd):
+    """Run a system command safely with error handling."""
+    try:
+        subprocess.run(cmd, shell=True, check=True, text=True, capture_output=True)
+        log_action("cmd", "success", cmd)
+    except subprocess.CalledProcessError as e:
+        log_action("cmd", "error", f"{cmd} => {e.stderr.strip()}")
+        print(f"Command failed: {cmd}\n{e.stderr.strip()}")
+        sys.exit(1)
 
 
-def calculate_subnet(base, typ):
-    net = ipaddress.IPv4Network(base, strict=False)
-    subs = list(net.subnets(new_prefix=24))
-    return str(subs[0] if typ == "public" else subs[1])
+"""Core VPC Functions """
+
+def create_vpc(name, base_cidr, public_iface=None):
+    bridge_name = f"br-{name}"
+    log_action("create-vpc", "started", f"Creating VPC {name} ({base_cidr})")
+
+    run_cmd(f"ip link add name {bridge_name} type bridge")
+    run_cmd(f"ip addr add {base_cidr.split('.')[0]}.{base_cidr.split('.')[1]}.0.1/16 dev {bridge_name}")
+    run_cmd(f"ip link set {bridge_name} up")
+
+    if public_iface:
+        run_cmd(f"iptables -t nat -A POSTROUTING -o {public_iface} -j MASQUERADE")
+
+    log_action("create-vpc", "success", f"Bridge {bridge_name} created")
+    print(f"VPC '{name}' created successfully.")
 
 
-def add_subnet(args):
-    ns, br = f"{args.vpc_name}-{args.subnet_name}", f"br-{args.vpc_name}"
-    veth_h = f"veth-{args.vpc_name[:3]}-{args.subnet_name[:2]}-h"
-    veth_n = f"veth-{args.vpc_name[:3]}-{args.subnet_name[:2]}-n"
+def add_subnet(vpc_name, subnet_name, subnet_type, base_cidr):
+    ns_name = f"{vpc_name}-{subnet_name}"
+    bridge_name = f"br-{vpc_name}"
 
-    cidr = args.cidr or calculate_subnet(args.base_cidr, args.type)
-    net = ipaddress.IPv4Network(cidr, strict=False)
-    hosts = list(net.hosts())
-    if len(hosts) < 2:
-        raise ValueError(f"CIDR {cidr} too small for subnet")
+    log_action("add-subnet", "started", f"Adding {subnet_type} subnet {subnet_name}")
 
-    # gateway = first usable, host = second usable
-    gw = str(hosts[0])
-    host_ip = str(hosts[1])
-    prefix = net.prefixlen
+    # Derive subnet IP (simple incremental logic)
+    subnet_id = "1" if subnet_type == "public" else "2"
+    subnet_cidr = f"{base_cidr.split('.')[0]}.{base_cidr.split('.')[1]}.{subnet_id}.0/24"
 
-    print(f"Adding {args.type} subnet '{ns}' (cidr={cidr})...")
-    run(f"sudo ip netns add {ns} 2>/dev/null || true")
-    run(f"sudo ip link del {veth_h} 2>/dev/null || true")
-    run(f"sudo ip link add {veth_h} type veth peer name {veth_n}")
-    run(f"sudo ip link set {veth_h} master {br} && sudo ip link set {veth_h} up")
-    run(f"sudo ip link set {veth_n} netns {ns} && sudo ip netns exec {ns} ip link set {veth_n} up")
+    veth_host = f"veth-{vpc_name[:3]}-{subnet_name[:3]}"
+    veth_ns = f"{veth_host}-ns"
 
-    # assign host IP inside namespace, and gateway IP on bridge (idempotent)
-    run(f"sudo ip netns exec {ns} ip addr add {host_ip}/{prefix} dev {veth_n} 2>/dev/null || true")
-    run(f"sudo ip addr add {gw}/{prefix} dev {br} 2>/dev/null || true")
+    run_cmd(f"ip netns add {ns_name}")
+    run_cmd(f"ip link add {veth_host} type veth peer name {veth_ns}")
+    run_cmd(f"ip link set {veth_ns} netns {ns_name}")
+    run_cmd(f"ip link set {veth_host} master {bridge_name}")
+    run_cmd(f"ip link set {veth_host} up")
+    run_cmd(f"ip netns exec {ns_name} ip addr add 10.20.{subnet_id}.2/24 dev {veth_ns}")
+    run_cmd(f"ip netns exec {ns_name} ip link set {veth_ns} up")
+    run_cmd(f"ip netns exec {ns_name} ip route add default via 10.20.{subnet_id}.1")
 
-    # local route always
-    run(f"sudo ip netns exec {ns} ip route add {net.network_address}/{prefix} dev {veth_n} 2>/dev/null || true")
-
-    if args.type == "public":
-        # public subnet gets internet access via NAT
-        run(f"sudo ip netns exec {ns} ip route add default via {gw} 2>/dev/null || true")
-        iface = subprocess.run(
-            "ip route | awk '/default/ {print $5; exit}'", shell=True, capture_output=True, text=True
-        ).stdout.strip()
-        if iface:
-            run(f"sudo iptables -t nat -C POSTROUTING -s {cidr} -o {iface} -j MASQUERADE 2>/dev/null || "
-                f"sudo iptables -t nat -A POSTROUTING -s {cidr} -o {iface} -j MASQUERADE")
-            print(f"NAT enabled for public subnet {cidr} via {iface}")
-    else:
-        # private subnet: route via gateway for VPC-local communication only
-        run(f"sudo ip netns exec {ns} ip route add default via {gw} 2>/dev/null || true")
-        print(f"Private subnet can reach public subnet within VPC, but has no internet access.")
-
-    print(f"Subnet '{ns}' ready — host IP {host_ip}, gateway {gw}")
+    log_action("add-subnet", "success", f"Subnet {subnet_name} ({subnet_cidr}) added")
+    print(f"Subnet '{subnet_name}' added successfully ({subnet_cidr}).")
 
 
-def peer_vpc(args):
-    br_a, br_b = f"br-{args.vpc_a}", f"br-{args.vpc_b}"
-    veth_a, veth_b = f"veth-{args.vpc_a[:3]}-{args.vpc_b[:3]}", f"veth-{args.vpc_b[:3]}-{args.vpc_a[:3]}"
-    print(f"Peering {args.vpc_a} ↔ {args.vpc_b}...")
-    run(f"sudo ip link del {veth_a} 2>/dev/null || true")
-    run(f"sudo ip link add {veth_a} type veth peer name {veth_b}")
-    run(f"sudo ip link set {veth_a} master {br_a} && sudo ip link set {veth_b} master {br_b}")
-    run(f"sudo ip link set {veth_a} up && sudo ip link set {veth_b} up")
-    print("✅ Peering complete.")
+def apply_policies(vpc_name, policies_file):
+    """Apply firewall rules defined in policies.json."""
+    log_action("apply-policies", "started", f"Applying policies from {policies_file}")
+
+    if not os.path.exists(policies_file):
+        log_action("apply-policies", "error", f"{policies_file} not found")
+        print(f"Policy file {policies_file} not found.")
+        sys.exit(1)
+
+    with open(policies_file, "r") as f:
+        policies = json.load(f)
+
+    for policy in policies:
+        subnet = policy["subnet"]
+        for rule in policy["ingress"]:
+            port = rule["port"]
+            proto = rule["protocol"]
+            action = rule["action"]
+
+            if action == "allow":
+                cmd = f"iptables -A INPUT -s {subnet} -p {proto} --dport {port} -j ACCEPT"
+            else:
+                cmd = f"iptables -A INPUT -s {subnet} -p {proto} --dport {port} -j DROP"
+
+            run_cmd(cmd)
+            log_action("firewall", "applied", f"{subnet} {action} {proto}:{port}")
+
+    log_action("apply-policies", "success", f"Policies applied to {vpc_name}")
+    print(f"Firewall policies applied successfully for VPC '{vpc_name}'.")
 
 
-def delete_vpc(args):
-    br = f"br-{args.name}"
-    print(f"Deleting VPC '{args.name}'...")
-    run(f"sudo ip link set {br} down || true && sudo ip link del {br} || true")
-    if args.public_interface and args.cidr:
-        run(
-            f"sudo iptables -t nat -D POSTROUTING -s {args.cidr} -o {args.public_interface} -j MASQUERADE || true")
-    print(f"✅ Deleted VPC '{args.name}'.")
+def delete_vpc(vpc_name):
+    bridge_name = f"br-{vpc_name}"
+    log_action("delete-vpc", "started", f"Deleting {vpc_name}")
 
+    # Delete namespaces
+    ns_list = subprocess.getoutput("ip netns list").splitlines()
+    for ns in ns_list:
+        if vpc_name in ns:
+            run_cmd(f"ip netns delete {ns.split()[0]}")
+
+    # Delete bridge
+    run_cmd(f"ip link set {bridge_name} down || true")
+    run_cmd(f"ip link delete {bridge_name} type bridge || true")
+
+    # Clean iptables rules related to vpcctl
+    run_cmd("iptables -F || true")
+    run_cmd("iptables -t nat -F || true")
+
+    # Remove logs directory
+    if os.path.exists(LOG_DIR):
+        run_cmd(f"rm -rf {LOG_DIR}")
+
+    log_action("delete-vpc", "success", f"{vpc_name} and all components removed")
+    print(f"Cleaned up VPC '{vpc_name}' successfully.")
+
+
+""" CLI Entry Point """
 
 def main():
-    p = argparse.ArgumentParser(description="vpcctl - Mini VPC CLI")
-    sp = p.add_subparsers(dest="cmd")
+    parser = argparse.ArgumentParser(description="VPC Simulation CLI")
+    subparsers = parser.add_subparsers(dest="command", required=True)
 
-    # Create
-    c = sp.add_parser("create-vpc")
-    c.add_argument("name")
-    c.add_argument("cidr")
-    c.add_argument("--public-interface")
-    c.set_defaults(func=create_vpc)
+    # create-vpc
+    p_create = subparsers.add_parser("create-vpc", help="Create a new VPC")
+    p_create.add_argument("name")
+    p_create.add_argument("base_cidr")
+    p_create.add_argument("--public-interface")
 
-    # Add subnet
-    s = sp.add_parser("add-subnet")
-    s.add_argument("vpc_name")
-    s.add_argument("subnet_name")
-    s.add_argument("--cidr")
-    s.add_argument("--base-cidr")
-    s.add_argument("--type", choices=["public", "private"], default="private")
-    s.set_defaults(func=add_subnet)
+    # add-subnet
+    p_add = subparsers.add_parser("add-subnet", help="Add a subnet to VPC")
+    p_add.add_argument("vpc_name")
+    p_add.add_argument("subnet_name")
+    p_add.add_argument("--type", required=True, choices=["public", "private"])
+    p_add.add_argument("--base-cidr", required=True)
 
-    # Delete
-    d = sp.add_parser("delete-vpc")
-    d.add_argument("name")
-    d.add_argument("--public-interface")
-    d.add_argument("--cidr")
-    d.set_defaults(func=delete_vpc)
+    # apply-policies
+    p_policies = subparsers.add_parser("apply-policies", help="Apply firewall policies")
+    p_policies.add_argument("vpc_name")
+    p_policies.add_argument("--policies", required=True)
 
-    # Peer
-    pr = sp.add_parser("peer-vpc")
-    pr.add_argument("vpc_a")
-    pr.add_argument("vpc_b")
-    pr.set_defaults(func=peer_vpc)
+    # delete-vpc
+    p_delete = subparsers.add_parser("delete-vpc", help="Delete a VPC and cleanup")
+    p_delete.add_argument("vpc_name")
 
-    args = p.parse_args()
-    if hasattr(args, "func"):
-        args.func(args)
-    else:
-        p.print_help()
+    args = parser.parse_args()
+
+    if args.command == "create-vpc":
+        create_vpc(args.name, args.base_cidr, args.public_interface)
+    elif args.command == "add-subnet":
+        add_subnet(args.vpc_name, args.subnet_name, args.type, args.base_cidr)
+    elif args.command == "apply-policies":
+        apply_policies(args.vpc_name, args.policies)
+    elif args.command == "delete-vpc":
+        delete_vpc(args.vpc_name)
 
 
 if __name__ == "__main__":
