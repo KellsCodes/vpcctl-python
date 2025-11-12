@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import ipaddress
 import os
 import sys
 import json
@@ -153,28 +154,108 @@ def peer_vpcs(vpc1, vpc2):
     br1 = f"br-{vpc1}"
     br2 = f"br-{vpc2}"
 
-    veth1 = f"peer-{vpc1[:2]}-{vpc2[:2]}a"
-    veth2 = f"peer-{vpc1[:2]}-{vpc2[:2]}b"
+    # Create shorter veth names
+    veth1 = f"p{vpc1[:3]}{vpc2[:3]}a"[:15]
+    veth2 = f"p{vpc1[:3]}{vpc2[:3]}b"[:15]
 
-    # Clean up any leftovers
+    # Clean up any existing peering
     run_cmd(f"ip link del {veth1} 2>/dev/null || true", ignore_error=True)
 
-    # Create the veth pair connecting both bridges
+    # Create veth pair to connect the two bridges
     run_cmd(f"ip link add {veth1} type veth peer name {veth2}")
     run_cmd(f"ip link set {veth1} master {br1}")
     run_cmd(f"ip link set {veth2} master {br2}")
-
-    # Assign link-local IPs for routing between VPCs
-    run_cmd(
-        f"ip addr add 169.254.{hash(vpc1) % 250}.{hash(vpc2) % 250}/30 dev {veth1}")
-    run_cmd(
-        f"ip addr add 169.254.{hash(vpc2) % 250}.{hash(vpc1) % 250}/30 dev {veth2}")
-
     run_cmd(f"ip link set {veth1} up")
     run_cmd(f"ip link set {veth2} up")
 
-    log_action("peer-vpc", "success", f"{vpc1} ↔ {vpc2} connected")
-    print(f"Peering established between {vpc1} and {vpc2}.")
+    # Enable IP forwarding on both bridges
+    run_cmd("sysctl -w net.ipv4.ip_forward=1")
+
+    # Get all namespaces for each VPC
+    ns_list1 = [ns.split()[0] for ns in subprocess.getoutput(
+        "ip netns list").splitlines() if vpc1 in ns]
+    ns_list2 = [ns.split()[0] for ns in subprocess.getoutput(
+        "ip netns list").splitlines() if vpc2 in ns]
+
+    def get_ns_subnets(ns):
+        """Extract subnet CIDRs from a namespace."""
+        subnets = []
+        output = subprocess.getoutput(f"ip netns exec {ns} ip addr show")
+        for line in output.splitlines():
+            line = line.strip()
+            if line.startswith("inet "):
+                ip_cidr = line.split()[1]
+                if not ip_cidr.startswith("127."):
+                    network = ipaddress.ip_network(ip_cidr, strict=False)
+                    subnets.append(str(network))
+        return subnets
+
+    def get_bridge_gateway(bridge_name):
+        """Get the primary gateway IP of a bridge."""
+        output = subprocess.getoutput(f"ip addr show {bridge_name}")
+        for line in output.splitlines():
+            line = line.strip()
+            if line.startswith("inet "):
+                ip_cidr = line.split()[1]
+                gateway_ip = ip_cidr.split('/')[0]
+                return gateway_ip
+        return None
+
+    # Collect all subnets from both VPCs
+    vpc1_subnets = set()
+    for ns in ns_list1:
+        vpc1_subnets.update(get_ns_subnets(ns))
+
+    vpc2_subnets = set()
+    for ns in ns_list2:
+        vpc2_subnets.update(get_ns_subnets(ns))
+
+    # Get bridge gateway IPs
+    br1_gateway = get_bridge_gateway(br1)
+    br2_gateway = get_bridge_gateway(br2)
+
+    if not br1_gateway or not br2_gateway:
+        log_action("peer-vpc", "error", "Failed to get bridge gateway IPs")
+        print(f"Error: Could not determine bridge gateway IPs")
+        sys.exit(1)
+
+    # Add routes on each bridge to forward traffic to the other VPC
+    for cidr in vpc2_subnets:
+        # Route from br1 to vpc2 subnets via br2's gateway
+        run_cmd(
+            f"ip route add {cidr} via {br2_gateway} dev {br1} || true", ignore_error=True)
+
+    for cidr in vpc1_subnets:
+        # Route from br2 to vpc1 subnets via br1's gateway
+        run_cmd(
+            f"ip route add {cidr} via {br1_gateway} dev {br2} || true", ignore_error=True)
+
+    # Add routes in namespaces to reach remote VPC subnets via their local bridge gateway
+    for ns in ns_list1:
+        for cidr in vpc2_subnets:
+            # Remove default route temporarily to avoid conflicts
+            run_cmd(
+                f"ip netns exec {ns} ip route add {cidr} via {br1_gateway} || true",
+                ignore_error=True
+            )
+
+    for ns in ns_list2:
+        for cidr in vpc1_subnets:
+            run_cmd(
+                f"ip netns exec {ns} ip route add {cidr} via {br2_gateway} || true",
+                ignore_error=True
+            )
+
+    # Enable forwarding between the bridges using iptables
+    run_cmd(
+        f"iptables -A FORWARD -i {br1} -o {br2} -j ACCEPT || true", ignore_error=True)
+    run_cmd(
+        f"iptables -A FORWARD -i {br2} -o {br1} -j ACCEPT || true", ignore_error=True)
+
+    log_action("peer-vpc", "success", f"{vpc1} ↔ {vpc2} peered")
+    print(f"✓ Peering established between '{vpc1}' and '{vpc2}'")
+    print(f"  {vpc1} subnets: {', '.join(sorted(vpc1_subnets))}")
+    print(f"  {vpc2} subnets: {', '.join(sorted(vpc2_subnets))}")
 
 
 def delete_vpc(vpc_name):
