@@ -76,9 +76,16 @@ def add_subnet(vpc_name, subnet_name, subnet_type, base_cidr):
     run_cmd(f"ip link set {veth_ns} netns {ns_name}")
     run_cmd(f"ip link set {veth_host} master {bridge_name}")
     run_cmd(f"ip link set {veth_host} up")
+
+    # Assign IPs
     run_cmd(
         f"ip netns exec {ns_name} ip addr add 10.10.{subnet_id}.2/24 dev {veth_ns}")
     run_cmd(f"ip netns exec {ns_name} ip link set {veth_ns} up")
+
+    # Add gateway IP for this subnet on the bridge
+    run_cmd(f"ip addr add 10.10.{subnet_id}.1/24 dev {bridge_name} || true")
+
+    # Default route for the subnet namespace
     run_cmd(
         f"ip netns exec {ns_name} ip route add default via 10.10.{subnet_id}.1")
 
