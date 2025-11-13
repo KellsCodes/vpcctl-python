@@ -32,6 +32,31 @@ def run_cmd(cmd, ignore_error=False):
         return None
 
 
+def _detect_all_bridges():
+    """Return list of bridge names (br-*) currently on host."""
+    output = subprocess.getoutput("ip link show type bridge").splitlines()
+    bridges = []
+    for line in output:
+        line = line.strip()
+        if not line:
+            continue
+        # lines look like: "54: br-vpc1: <BROADCAST,...>"
+        parts = line.split(':')
+        if len(parts) >= 2:
+            br = parts[1].strip().split('@')[0]
+            if br.startswith('br-'):
+                bridges.append(br)
+    return bridges
+
+
+def ensure_conntrack_forward_rule():
+    """Ensure RELATED,ESTABLISHED accept exists near top of FORWARD chain (idempotent)."""
+    cmd = ("iptables -C FORWARD -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT "
+           "|| iptables -I FORWARD 1 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT")
+    run_cmd(cmd, ignore_error=True)
+    log_action("iptables", "conntrack-ensure", "RELATED,ESTABLISHED at top of FORWARD")
+
+
 def create_vpc(name, base_cidr, public_iface=None):
     bridge_name = f"br-{name}"
     log_action("create-vpc", "started", f"Creating VPC {name} ({base_cidr})")
@@ -42,6 +67,34 @@ def create_vpc(name, base_cidr, public_iface=None):
         f"ip addr add {base_cidr.split('.')[0]}.{base_cidr.split('.')[1]}.0.1/16 dev {bridge_name}")
     run_cmd(f"ip link set {bridge_name} up")
 
+    # Ensure conntrack rule exists before inserting other FORWARD rules
+    ensure_conntrack_forward_rule()
+
+    # Allow traffic within same VPC (bridge -> bridge) explicitly (idempotent)
+    run_cmd(
+        f"iptables -C FORWARD -i {bridge_name} -o {bridge_name} -j ACCEPT || "
+        f"iptables -I FORWARD 2 -i {bridge_name} -o {bridge_name} -j ACCEPT",
+        ignore_error=True
+    )
+
+    # Isolate this VPC from all other existing br-* bridges (drop cross-bridge forwarding)
+    existing_bridges = _detect_all_bridges()
+    for other in existing_bridges:
+        if other == bridge_name:
+            continue
+        # Block traffic from this bridge to the other
+        run_cmd(
+            f"iptables -C FORWARD -i {bridge_name} -o {other} -j DROP || "
+            f"iptables -I FORWARD 3 -i {bridge_name} -o {other} -j DROP",
+            ignore_error=True
+        )
+        # Block traffic from the other to this bridge
+        run_cmd(
+            f"iptables -C FORWARD -i {other} -o {bridge_name} -j DROP || "
+            f"iptables -I FORWARD 3 -i {other} -o {bridge_name} -j DROP",
+            ignore_error=True
+        )
+
     # Save public interface metadata so add_subnet can apply NAT only for public subnets
     os.makedirs(LOG_DIR, exist_ok=True)
     meta_file = os.path.join(LOG_DIR, f"{name}.meta")
@@ -49,7 +102,7 @@ def create_vpc(name, base_cidr, public_iface=None):
     with open(meta_file, "w") as mf:
         json.dump(meta, mf)
 
-    log_action("create-vpc", "success", f"Bridge {bridge_name} created")
+    log_action("create-vpc", "success", f"Bridge {bridge_name} created and isolated")
     print(f"VPC '{name}' created successfully.")
 
 
@@ -289,6 +342,18 @@ def peer_vpcs(vpc1, vpc2):
     log_action("peer-vpc", "info",
                f"Bridge gateways: {br1}={br1_gateway}, {br2}={br2_gateway}")
 
+    # Remove isolation DROP rules between these two VPCs (if any)
+    run_cmd(f"iptables -D FORWARD -i {br1} -o {br2} -j DROP 2>/dev/null || true", ignore_error=True)
+    run_cmd(f"iptables -D FORWARD -i {br2} -o {br1} -j DROP 2>/dev/null || true", ignore_error=True)
+
+    # Enable forwarding between the bridges using iptables (idempotent)
+    run_cmd(
+        f"iptables -C FORWARD -i {br1} -o {br2} -j ACCEPT || iptables -I FORWARD 2 -i {br1} -o {br2} -j ACCEPT",
+        ignore_error=True)
+    run_cmd(
+        f"iptables -C FORWARD -i {br2} -o {br1} -j ACCEPT || iptables -I FORWARD 2 -i {br2} -o {br1} -j ACCEPT",
+        ignore_error=True)
+
     # Add routes in namespaces to reach remote VPC subnets via their local bridge gateway
     for ns in ns_list1:
         for cidr in vpc2_subnets:
@@ -314,12 +379,6 @@ def peer_vpcs(vpc1, vpc2):
         cmd = f"ip route add {cidr} dev {br2}"
         run_cmd(cmd, ignore_error=True)
         log_action("peer-vpc-host-route", "added", f"{cidr} via {br2}")
-
-    # Enable forwarding between the bridges using iptables
-    run_cmd(
-        f"iptables -A FORWARD -i {br1} -o {br2} -j ACCEPT || true", ignore_error=True)
-    run_cmd(
-        f"iptables -A FORWARD -i {br2} -o {br1} -j ACCEPT || true", ignore_error=True)
 
     log_action("peer-vpc", "success", f"{vpc1} ↔ {vpc2} peered")
     print(f"✓ Peering established between '{vpc1}' and '{vpc2}'")
