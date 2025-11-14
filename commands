@@ -1,0 +1,56 @@
+CREATE A VPC
+sudo python3 vpcctl.py create-vpc vpc1 10.10.0.0/16 --public-interface wlp2s0
+
+ADD PUBLIC SUBNET
+sudo python3 vpcctl.py add-subnet vpc1 public --type public --base-cidr 10.10.0.0/16
+
+ADD PRIVATE SUBNET
+sudo python3 vpcctl.py add-subnet vpc1 private --type private --base-cidr 10.10.0.0/16
+
+
+COMMUNICATION between SUBNETS in the same VPC
+sudo ip netns exec vpc1-private ping -c 3 10.10.2.1
+sudo ip netns exec vpc1-public ping -c 3 10.10.2.2
+
+
+OUTBOUND access from public subnet ----------------- Works successfully.
+sudo ip netns exec vpc1-public ping -c 3 8.8.8.8
+
+OUTBOUND access from private subnet ----------------- Blocked or restricted.
+sudo ip netns exec vpc1-private ping -c 3 8.8.8.8
+
+
+SECOND VPC (FOR MULTI VPC TESTING)
+
+=========================================================================
+CREATE 2ND VPC2
+sudo python3 vpcctl.py create-vpc vpc2 10.20.0.0/16 --public-interface wlp2s0
+
+ADD PUBLIC SUBNET
+sudo python3 vpcctl.py add-subnet vpc2 public --type public --base-cidr 10.20.0.0/16
+
+ADD PRIVATE SUBNET
+sudo python3 vpcctl.py add-subnet vpc2 private --type private --base-cidr 10.20.0.0/16
+
+==========================================================
+
+COMMUNICATION between different VPCs ----------------- Blocked by default.
+sudo ip netns exec vpc1-public ping -c 3 10.20.1.2
+
+========================= PEERING THE VPCS ================
+sudo python3 vpcctl.py peer-vpc vpc1 vpc2
+===========================================================
+COMMUNICATION after peering ----------------- Allowed where explicitly configured.
+sudo ip netns exec vpc1-public ping -c 3 10.20.1.2
+sudo ip netns exec vpc2-public ping -c 3 10.10.1.2
+===========================================================
+
+POLICY enforcement ----------------- Specific connections blocked as defined.
+sudo python3 vpcctl.py apply-policies vpc2 --policies policies.json
+
+Start a simple HTTP server in the target namespace
+sudo ip netns exec vpc2-private python3 -m http.server 80
+
+Test from the source namespace using nc:
+sudo ip netns exec vpc1-public nc -vz 10.20.2.2 80
+
