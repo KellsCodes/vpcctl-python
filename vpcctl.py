@@ -54,7 +54,8 @@ def ensure_conntrack_forward_rule():
     cmd = ("iptables -C FORWARD -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT "
            "|| iptables -I FORWARD 1 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT")
     run_cmd(cmd, ignore_error=True)
-    log_action("iptables", "conntrack-ensure", "RELATED,ESTABLISHED at top of FORWARD")
+    log_action("iptables", "conntrack-ensure",
+               "RELATED,ESTABLISHED at top of FORWARD")
 
 
 def create_vpc(name, base_cidr, public_iface=None):
@@ -102,7 +103,8 @@ def create_vpc(name, base_cidr, public_iface=None):
     with open(meta_file, "w") as mf:
         json.dump(meta, mf)
 
-    log_action("create-vpc", "success", f"Bridge {bridge_name} created and isolated")
+    log_action("create-vpc", "success",
+               f"Bridge {bridge_name} created and isolated")
     print(f"VPC '{name}' created successfully.")
 
 
@@ -343,8 +345,10 @@ def peer_vpcs(vpc1, vpc2):
                f"Bridge gateways: {br1}={br1_gateway}, {br2}={br2_gateway}")
 
     # Remove isolation DROP rules between these two VPCs (if any)
-    run_cmd(f"iptables -D FORWARD -i {br1} -o {br2} -j DROP 2>/dev/null || true", ignore_error=True)
-    run_cmd(f"iptables -D FORWARD -i {br2} -o {br1} -j DROP 2>/dev/null || true", ignore_error=True)
+    run_cmd(
+        f"iptables -D FORWARD -i {br1} -o {br2} -j DROP 2>/dev/null || true", ignore_error=True)
+    run_cmd(
+        f"iptables -D FORWARD -i {br2} -o {br1} -j DROP 2>/dev/null || true", ignore_error=True)
 
     # Enable forwarding between the bridges using iptables (idempotent)
     run_cmd(
