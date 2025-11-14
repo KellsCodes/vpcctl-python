@@ -5,7 +5,7 @@ Each VPC contains public and private subnets, with routing, NAT, and isolation c
 ## Features
 * Create multiple isolated VPCs with their own bridges and routing rules.
 
-* Add public and private subnets to each VPC automatically.
+* Add public and private subnets to each VPC.
 
 * Configure NAT for outbound Internet access via the host’s interface.
 
@@ -42,6 +42,11 @@ Make sure the following are installed on your Linux host:
 
 ## Usage
 You can either run commands directly with vpcctl.py or automate everything using the Makefile.
+
+```bash
+sudo apt update
+sudo apt install -y iproute2 iptables net-tools
+```
 **Option 1: Using the Makefile**
 To create and test everything automatically:
 ```bash
@@ -55,18 +60,22 @@ This will:
 
 3. Enable NAT for Internet-bound traffic.
 
-4. Display the final namespace and route configurations.
+4. Test VPCs isolation
+
+5. Peer the VPCs and test peering
+
+6. Display the final namespace and route configurations.
 
 To clean up everything:
 ```bash
-make clean
+make cleanup
 ```
 
 **Option 2: Using Python Script Directly**
 You can also run individual operations with Python:
 1. Create a new VPC
 ```bash
-sudo python3 vpcctl.py create-vpc vpc1 --base-cidr 10.10.0.0/16
+sudo python3 vpcctl.py create-vpc vpc1 10.10.0.0/16 --public-interface <wlp2s0> (use your network interface here e.g eth0 )
 ```
 2. Add a public subnet
 ```bash
@@ -122,12 +131,19 @@ sudo ip netns exec vpc1-public ping -c 2 8.8.8.8
 *(works only if host Internet and NAT are active)*
 
 ### Makefile Commands Overview
-| Command      | Description                                              |
-| ------------ | -------------------------------------------------------- |
-| `make all`   | Builds and tests all VPCs with subnets.                  |
-| `make vpc1`  | Creates VPC1 with public and private subnets.            |
-| `make vpc2`  | Creates VPC2 with public and private subnets.            |
-| `make clean` | Removes all VPC namespaces, bridges, and iptables rules. |
+| Command               | Description                                              |
+| --------------------- | -------------------------------------------------------- |
+| `make all`            | Builds and tests all VPCs with subnets.                  |
+| `make create-vpcs`    | Creates VPC1 and VPC2.                                   |
+| `make add-subnets`    | Adds public and private subnets to VPC1 and VPC2            |
+| `make peer-vpcs`      | Peers VPC1 and VPC2 to allow communication between them. |
+| `make test-peering`   | Test communication between VPC1 and VPC2                 |
+| `make test-isolation` | Test communication of subnets on thesame VPC             |
+| `make test-internet`  | Test NAT on public subnet and restriction on private subnet |
+| `make apply-policies` | Applies firewall policies on policies.json               |
+| `make test-policies`  | Test if firewall policies works on the target VPC        |
+| `make verify`         | Verifies the VPCs namespaces, bridges, routes            |
+| `make cleanup`        | Removes all VPC namespaces, bridges, and iptables rules. |
 
 **Example Output (abridged)**
 ```bash
@@ -144,7 +160,7 @@ VPC2 setup complete.
 ### Cleanup
 To delete all configurations and restore your host networking:
 ```bash
-make clean
+make cleanup
 ```
 This removes:
 
@@ -158,7 +174,7 @@ This removes:
 
 **Notes**
 
-* The project uses hardcoded CIDRs (10.10.0.0/16, 10.20.0.0/16, etc.) for clarity.
+* The project uses hardcoded CIDRs on the Makefile (10.10.0.0/16, 10.20.0.0/16, etc.) for testing and clarity.
 These can be customized in the Makefile or passed as CLI arguments.
 
 * Works best on Ubuntu/Debian-based systems with systemd networking.
